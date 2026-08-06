@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Caspian Monitoring System — AIS</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        #map { height: 100vh; width: 100vw; }
+
+        #panel {
+            position: absolute; top: 20px; right: 20px; z-index: 1000;
+            background: rgba(255, 255, 255, 0.97); padding: 16px 20px;
+            border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+            max-width: 340px; font-size: 14px;
+        }
+        #panel h3 { margin: 0 0 10px 0; font-size: 16px; }
+
+        .vessel-card {
+            border-top: 1px solid #eee; padding-top: 8px; margin-top: 8px;
+        }
+        .vessel-card:first-of-type { border-top: none; margin-top: 0; }
+        .vessel-card p { margin: 2px 0; }
+
+        .status-ok { color: #1a7a1a; font-weight: bold; }
+        .status-alarm { color: #c60000; font-weight: bold; animation: blink 1s infinite; }
+        @keyframes blink { 50% { opacity: 0.35; } }
+
+        .legend-dot {
+            display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+            margin-right: 6px;
+        }
+        .legend { font-size: 12px; color: #555; margin-top: 10px; line-height: 1.6; }
+
+        #connection-banner {
+            position: absolute; bottom: 20px; left: 20px; z-index: 1000;
+            background: rgba(0,0,0,0.75); color: #fff; padding: 8px 14px;
+            border-radius: 6px; font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="panel">
+        <h3>Caspian Monitoring System — AIS</h3>
+        <div id="vessel-list">Ожидание подключения к потоку...</div>
+        <div class="legend">
+            <div><span class="legend-dot" style="background:#2b7de9;"></span>Судно (AIS активен)</div>
+            <div><span class="legend-dot" style="background:#c60000;"></span>Судно (DARK SHIP)</div>
+            <div><span class="legend-dot" style="background:#2e8b57; opacity:0.4;"></span>Заповедник</div>
+            <div><span class="legend-dot" style="background:#e08a00; opacity:0.4;"></span>Зона Кашагана</div>
+        </div>
+    </div>
+
+    <div id="connection-banner">Подключение к ws://localhost:8765...</div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map('map').setView([45.0, 51.5], 6);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        L.circle([45.9000, 52.5250], {
+            radius: 35000, color: '#2e8b57', fillColor: '#2e8b57', fillOpacity: 0.15, weight: 1
+        }).addTo(map).bindPopup('Заповедник: лежбища каспийского тюленя (о-ва Дурнева/Прорва/Ремонтные Шалыги)');
+
+        L.circle([46.5000, 51.9000], {
+            radius: 15000, color: '#e08a00', fillColor: '#e08a00', fillOpacity: 0.15, weight: 1
+        }).addTo(map).bindPopup('Месторождение Кашаган — зона контроля нефтедобычи');
+
+        const vesselMarkers = {};
+
+        function vesselIcon(online) {
+            return L.divIcon({
+                className: '',
+                html: `<div style="
+                    width:16px; height:16px; border-radius:50%;
+                    background:${online ? '#2b7de9' : '#c60000'};
+                    border:2px solid white; box-shadow:0 0 4px rgba(0,0,0,0.5);
+                "></div>`,
+                iconSize: [16, 16],
+                iconAnchor: [8, 8]
+            });
+        }
+
+        function renderVesselPanel(vessels) {
+            const listEl = document.getElementById('vessel-list');
+            listEl.innerHTML = vessels.map(v => {
+                const statusClass = v.ais_online ? 'status-ok' : 'status-alarm';
+                const statusText = v.ais_online ? 'АКТИВЕН' : 'DARK SHIP — СИГНАЛ ПОТЕРЯН';
+                const zoneNote = v.zones.in_protected_zone
+                    ? ' <b>[В ЗАПОВЕДНИКЕ]</b>'
+                    : (v.zones.in_oilfield_zone ? ' [ЗОНА КАШАГАНА]' : '');
+                return `
+                    <div class="vessel-card">
+                        <p><b>${v.vessel_name}</b> (MMSI ${v.mmsi})</p>
+                        <p>Координаты: ${v.latitude}, ${v.longitude}</p>
+                        <p>Скорость: ${v.speed_knots} узл. | Курс: ${v.course}°</p>
+                        <p>AIS: <span class="${statusClass}">${statusText}</span>${zoneNote}</p>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function updateMarkers(vessels) {
+            vessels.forEach(v => {
+                const latLng = [v.latitude, v.longitude];
+                if (!vesselMarkers[v.mmsi]) {
+                    vesselMarkers[v.mmsi] = L.marker(latLng, { icon: vesselIcon(v.ais_online) })
+                        .addTo(map)
+                        .bindPopup(`<b>${v.vessel_name}</b><br>MMSI: ${v.mmsi}`);
+                } else {
+                    vesselMarkers[v.mmsi].setLatLng(latLng);
+                    vesselMarkers[v.mmsi].setIcon(vesselIcon(v.ais_online));
+                }
+            });
+        }
+
+        const socket = new WebSocket('ws://localhost:8765');
+        const banner = document.getElementById('connection-banner');
+
+        socket.onopen = () => {
+            banner.innerText = 'Подключено к AIS-потоку';
+            setTimeout(() => { banner.style.display = 'none'; }, 2000);
+        };
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+
+            const vessels = data.vessels || [];
+            if (vessels.length === 0) return;
+
+            renderVesselPanel(vessels);
+            updateMarkers(vessels);
+        };
+
+        socket.onerror = function(error) {
+            banner.style.display = 'block';
+            banner.innerText = 'Ошибка подключения к ws://localhost:8765';
+            console.error('Ошибка WebSocket:', error);
+        };
+
+        socket.onclose = function() {
+            banner.style.display = 'block';
+            banner.innerText = 'Соединение закрыто';
+        };
+    </script>
+</body>
+</html>
